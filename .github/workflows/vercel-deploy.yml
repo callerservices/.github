@@ -1,0 +1,114 @@
+# Shared Vercel deploy workflow for callerservices repos.
+# Called by individual repos via workflow_call.
+#
+# How it works:
+#   1. Detects which top-level folders changed in the push
+#   2. For each folder, queries the Vercel API to see if a project with that name exists
+#   3. If it does, deploys that folder to the matching Vercel project
+#   4. Uses the org-level VERCEL_TOKEN and VERCEL_ORG_ID secrets (not individual accounts)
+#
+# Required org-level secrets:
+#   VERCEL_TOKEN  - a Vercel API token scoped to the Sokolove Law team
+#   VERCEL_ORG_ID - the Vercel team ID (starts with team_)
+
+name: Deploy to Vercel (Shared)
+
+on:
+  workflow_call:
+    secrets:
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+
+jobs:
+  detect:
+    name: Detect changed projects
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.find.outputs.projects }}
+      has_projects: ${{ steps.find.outputs.has_projects }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed project folders
+        id: find
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        run: |
+          echo "::group::Detecting changed folders"
+
+          # Get top-level folders that changed in this push
+          CHANGED_DIRS=$(git diff --name-only HEAD~1 HEAD | cut -d'/' -f1 | sort -u)
+          echo "Changed top-level entries: $CHANGED_DIRS"
+
+          PROJECTS="[]"
+
+          for DIR in $CHANGED_DIRS; do
+            # Skip dotfiles/dotfolders (.github, .gitignore, etc.)
+            [[ "$DIR" == .* ]] && continue
+            # Skip if not a directory
+            [ ! -d "$DIR" ] && continue
+
+            echo "Checking if '$DIR' is a Vercel project..."
+
+            # Query Vercel API for a project matching this folder name
+            HTTP_CODE=$(curl -s -o /tmp/vercel-response.json -w "%{http_code}" \
+              -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v9/projects/$DIR?teamId=$VERCEL_ORG_ID")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              PROJECT_ID=$(jq -r '.id' /tmp/vercel-response.json)
+              echo "  Found Vercel project: $DIR (ID: $PROJECT_ID)"
+              PROJECTS=$(echo "$PROJECTS" | jq -c \
+                --arg dir "$DIR" \
+                --arg id "$PROJECT_ID" \
+                '. + [{"folder": $dir, "projectId": $id}]')
+            else
+              echo "  Not a Vercel project, skipping."
+            fi
+          done
+
+          echo "::endgroup::"
+
+          echo "projects=$PROJECTS" >> "$GITHUB_OUTPUT"
+          if [ "$PROJECTS" = "[]" ]; then
+            echo "has_projects=false" >> "$GITHUB_OUTPUT"
+            echo "No Vercel projects to deploy."
+          else
+            echo "has_projects=true" >> "$GITHUB_OUTPUT"
+            echo "Will deploy: $PROJECTS"
+          fi
+
+  deploy:
+    name: "Deploy: ${{ matrix.project.folder }}"
+    needs: detect
+    if: needs.detect.outputs.has_projects == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect.outputs.projects) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy ${{ matrix.project.folder }} to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ matrix.project.projectId }}
+        run: |
+          cd "${{ matrix.project.folder }}"
+          echo "Pulling Vercel project config..."
+          vercel pull --yes --token="$VERCEL_TOKEN"
+          echo "Building..."
+          vercel build --prod --token="$VERCEL_TOKEN"
+          echo "Deploying to production..."
+          DEPLOY_URL=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "Deployed: $DEPLOY_URL"
