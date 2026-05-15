@@ -6,6 +6,7 @@
 #   2. For each folder, queries the Vercel API to see if a project with that name exists
 #   3. If it does, deploys that folder to the matching Vercel project
 #   4. Uses the org-level VERCEL_TOKEN and VERCEL_ORG_ID secrets (not individual accounts)
+#   5. Auto-disables Vercel's native GitHub deploy to prevent "Blocked" noise
 #
 # Required org-level secrets:
 #   VERCEL_TOKEN  - a Vercel API token scoped to the Sokolove Law team
@@ -67,6 +68,21 @@ jobs:
                 --arg dir "$DIR" \
                 --arg id "$PROJECT_ID" \
                 '. + [{"folder": $dir, "projectId": $id}]')
+
+              # Auto-disable Vercel's native GitHub deploy if not already set
+              # This prevents "Blocked" deployments for users without Vercel accounts
+              CURRENT_IGNORE=$(jq -r '.commandForIgnoringBuildStep // empty' /tmp/vercel-response.json)
+              if [ -z "$CURRENT_IGNORE" ]; then
+                echo "  Setting ignored build step to suppress native deploys..."
+                curl -s -o /dev/null -X PATCH \
+                  -H "Authorization: Bearer $VERCEL_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "https://api.vercel.com/v9/projects/$PROJECT_ID?teamId=$VERCEL_ORG_ID" \
+                  -d '{"commandForIgnoringBuildStep":"exit 0"}'
+                echo "  Native deploy suppressed."
+              else
+                echo "  Ignored build step already set."
+              fi
             else
               echo "  Not a Vercel project, skipping."
             fi
