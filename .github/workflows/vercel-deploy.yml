@@ -104,7 +104,6 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ matrix.project.projectId }}
         run: |
-          cd "${{ matrix.project.folder }}"
           echo "Pulling Vercel project config..."
           vercel pull --yes --token="$VERCEL_TOKEN"
           echo "Building..."
